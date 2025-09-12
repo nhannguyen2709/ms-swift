@@ -231,6 +231,8 @@ The table below introduces the models integrated with ms-swift:
 |[Qwen/Qwen3-235B-A22B-Thinking-2507](https://modelscope.cn/models/Qwen/Qwen3-235B-A22B-Thinking-2507)|qwen3_moe_thinking|qwen3_thinking|transformers>=4.51|&#x2714;|-|[Qwen/Qwen3-235B-A22B-Thinking-2507](https://huggingface.co/Qwen/Qwen3-235B-A22B-Thinking-2507)|
 |[Qwen/Qwen3-235B-A22B-Thinking-2507-FP8](https://modelscope.cn/models/Qwen/Qwen3-235B-A22B-Thinking-2507-FP8)|qwen3_moe_thinking|qwen3_thinking|transformers>=4.51|&#x2718;|-|[Qwen/Qwen3-235B-A22B-Thinking-2507-FP8](https://huggingface.co/Qwen/Qwen3-235B-A22B-Thinking-2507-FP8)|
 |[swift/Qwen3-235B-A22B-Thinking-2507-AWQ](https://modelscope.cn/models/swift/Qwen3-235B-A22B-Thinking-2507-AWQ)|qwen3_moe_thinking|qwen3_thinking|transformers>=4.51|&#x2718;|-|-|
+|[Qwen/Qwen3-Next-80B-A3B-Instruct](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)|qwen3_next|qwen3_nothinking|transformers>=4.57.0.dev|&#x2718;|-|-|
+|[Qwen/Qwen3-Next-80B-A3B-Thinking](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Thinking)|qwen3_next_thinking|qwen3_thinking|transformers>=4.57.0.dev|&#x2718;|-|-|
 |[Qwen/Qwen3-Embedding-0.6B](https://modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B)|qwen3_emb|qwen3_emb|-|&#x2718;|-|[Qwen/Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B)|
 |[Qwen/Qwen3-Embedding-4B](https://modelscope.cn/models/Qwen/Qwen3-Embedding-4B)|qwen3_emb|qwen3_emb|-|&#x2718;|-|[Qwen/Qwen3-Embedding-4B](https://huggingface.co/Qwen/Qwen3-Embedding-4B)|
 |[Qwen/Qwen3-Embedding-8B](https://modelscope.cn/models/Qwen/Qwen3-Embedding-8B)|qwen3_emb|qwen3_emb|-|&#x2718;|-|[Qwen/Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B)|
@@ -701,8 +703,8 @@ The table below introduces the models integrated with ms-swift:
 |[AIDC-AI/Ovis2-8B](https://modelscope.cn/models/AIDC-AI/Ovis2-8B)|ovis2|ovis2|transformers>=4.46.2, moviepy<2|&#x2718;|vision|[AIDC-AI/Ovis2-8B](https://huggingface.co/AIDC-AI/Ovis2-8B)|
 |[AIDC-AI/Ovis2-16B](https://modelscope.cn/models/AIDC-AI/Ovis2-16B)|ovis2|ovis2|transformers>=4.46.2, moviepy<2|&#x2718;|vision|[AIDC-AI/Ovis2-16B](https://huggingface.co/AIDC-AI/Ovis2-16B)|
 |[AIDC-AI/Ovis2-34B](https://modelscope.cn/models/AIDC-AI/Ovis2-34B)|ovis2|ovis2|transformers>=4.46.2, moviepy<2|&#x2718;|vision|[AIDC-AI/Ovis2-34B](https://huggingface.co/AIDC-AI/Ovis2-34B)|
-|[AIDC-AI/Ovis2.5-2B](https://modelscope.cn/models/AIDC-AI/Ovis2.5-2B)|ovis2_5|ovis2_5|transformers>=4.46.2, moviepy<2|&#x2718;|vision|[AIDC-AI/Ovis2.5-2B](https://huggingface.co/AIDC-AI/Ovis2.5-2B)|
-|[AIDC-AI/Ovis2.5-9B](https://modelscope.cn/models/AIDC-AI/Ovis2.5-9B)|ovis2_5|ovis2_5|transformers>=4.46.2, moviepy<2|&#x2718;|vision|[AIDC-AI/Ovis2.5-9B](https://huggingface.co/AIDC-AI/Ovis2.5-9B)|
+|[AIDC-AI/Ovis2.5-2B](https://modelscope.cn/models/AIDC-AI/Ovis2.5-2B)|ovis2_5|ovis2_5|transformers>=4.46.2, moviepy<2|&#x2714;|vision|[AIDC-AI/Ovis2.5-2B](https://huggingface.co/AIDC-AI/Ovis2.5-2B)|
+|[AIDC-AI/Ovis2.5-9B](https://modelscope.cn/models/AIDC-AI/Ovis2.5-9B)|ovis2_5|ovis2_5|transformers>=4.46.2, moviepy<2|&#x2714;|vision|[AIDC-AI/Ovis2.5-9B](https://huggingface.co/AIDC-AI/Ovis2.5-9B)|
 |[XiaomiMiMo/MiMo-VL-7B-SFT](https://modelscope.cn/models/XiaomiMiMo/MiMo-VL-7B-SFT)|mimo_vl|mimo_vl|transformers>=4.49, qwen_vl_utils>=0.0.6, decord|&#x2718;|vision, video|[XiaomiMiMo/MiMo-VL-7B-SFT](https://huggingface.co/XiaomiMiMo/MiMo-VL-7B-SFT)|
 |[XiaomiMiMo/MiMo-VL-7B-RL](https://modelscope.cn/models/XiaomiMiMo/MiMo-VL-7B-RL)|mimo_vl|mimo_vl|transformers>=4.49, qwen_vl_utils>=0.0.6, decord|&#x2718;|vision, video|[XiaomiMiMo/MiMo-VL-7B-RL](https://huggingface.co/XiaomiMiMo/MiMo-VL-7B-RL)|
 |[mispeech/midashenglm-7b](https://modelscope.cn/models/mispeech/midashenglm-7b)|midashenglm|midashenglm|transformers>=4.52, soundfile|&#x2718;|audio|[mispeech/midashenglm-7b](https://huggingface.co/mispeech/midashenglm-7b)|
