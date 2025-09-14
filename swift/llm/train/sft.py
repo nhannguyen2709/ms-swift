@@ -161,7 +161,7 @@ class SwiftSft(SwiftPipeline, TunerMixin):
                     load_from_cache_file=args.load_from_cache_file,
                     strict=args.strict)
             datasets[i] = dataset
-        self._show_dataset(*datasets)
+        # self._show_dataset(*datasets)
         return datasets
 
     def run(self):
