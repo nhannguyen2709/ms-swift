@@ -30,6 +30,7 @@ try:
     os.environ['VLLM_ENGINE_ITERATION_TIMEOUT_S'] = '86400'
     import vllm
     from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams, EngineArgs, LLMEngine
+    from vllm.pooling_params import PoolingParams
 except Exception:
     raise
 
@@ -68,11 +69,12 @@ class VllmEngine(InferEngine):
         task_type: Optional[str] = None,  # embedding
         disable_cascade_attn: bool = False,
         load_format: str = 'auto',
+        mm_processor_cache_gb: Optional[float] = None,
         # lora
         enable_lora: bool = False,
         max_loras: int = 1,
         max_lora_rank: int = 16,
-        enable_prefix_caching: bool = False,
+        enable_prefix_caching: Optional[bool] = None,
         enable_sleep_mode: bool = False,
         distributed_executor_backend: Optional[str] = None,
         quantization: Optional[str] = None,
@@ -80,6 +82,8 @@ class VllmEngine(InferEngine):
         reasoning_parser: Optional[str] = None,
         engine_kwargs: Optional[Dict[str, Any]] = None,
         template: Optional[Template] = None,
+        num_labels: Optional[int] = None,
+        reranker_use_activation: bool = True,
     ) -> None:
         if engine_kwargs is None:
             engine_kwargs = {}
@@ -92,6 +96,7 @@ class VllmEngine(InferEngine):
             self.default_adapter_request = AdapterRequest('default', adapters[0])
         patch_vllm_memory_leak()
         self.use_async_engine = use_async_engine
+        self.reranker_use_activation = reranker_use_activation
         self.processor = get_model_tokenizer(
             model_id_or_path,
             torch_dtype,
@@ -101,6 +106,7 @@ class VllmEngine(InferEngine):
             use_hf=use_hf,
             hub_token=hub_token,
             revision=revision,
+            num_labels=num_labels,
             task_type=task_type)[1]
         self._post_init(template)
 
@@ -124,6 +130,7 @@ class VllmEngine(InferEngine):
             quantization=quantization,
             task=task_type,
             disable_cascade_attn=disable_cascade_attn,
+            mm_processor_cache_gb=mm_processor_cache_gb,
             **engine_kwargs,
         )
         context = nullcontext()
@@ -158,16 +165,21 @@ class VllmEngine(InferEngine):
         enable_lora: bool = False,
         max_loras: int = 1,
         max_lora_rank: int = 16,
-        enable_prefix_caching: bool = False,
+        enable_prefix_caching: Optional[bool] = None,
         distributed_executor_backend: Optional[str] = None,
         enable_sleep_mode: bool = False,
         task: Optional[str] = None,
         disable_cascade_attn: bool = False,
         load_format: str = 'auto',
+        mm_processor_cache_gb: Optional[float] = None,
         **engine_kwargs,
     ) -> None:
         if task == 'embedding':
             task = 'embed'
+        elif task == 'seq_cls':
+            task = 'classify'
+        elif task in ('reranker', 'generative_reranker'):
+            task = 'score'
         disable_log_stats = engine_kwargs.pop('disable_log_stats', True)
         if self.use_async_engine:
             engine_cls = AsyncEngineArgs
@@ -188,9 +200,13 @@ class VllmEngine(InferEngine):
         else:
             assert not limit_mm_per_prompt, (
                 'The current version of vLLM does not support `limit_mm_per_prompt`. Please upgrade vLLM.')
-        for key in ['enable_expert_parallel', 'enable_sleep_mode', 'disable_cascade_attn', 'load_format']:
+        for key in [
+                'enable_expert_parallel', 'enable_sleep_mode', 'disable_cascade_attn', 'load_format',
+                'mm_processor_cache_gb'
+        ]:
             if key in parameters:
-                engine_kwargs[key] = locals()[key]
+                if locals()[key] is not None:
+                    engine_kwargs[key] = locals()[key]
             else:
                 logger.warning(f'The current version of vLLM does not support `{key}`. Ignored.')
         for key in ['task', 'seed']:
@@ -203,6 +219,10 @@ class VllmEngine(InferEngine):
         if self.model_meta.model_type in arch_mapping:
             architectures = arch_mapping[self.model_meta.model_type]
             engine_kwargs['hf_overrides'] = {'architectures': architectures}
+        self.default_template.set_mode('vllm')
+        engine_kwargs.update(self.default_template.prepare_engine_kwargs())
+        if enable_prefix_caching is not None:
+            engine_kwargs['enable_prefix_caching'] = enable_prefix_caching
         engine_args = engine_cls(
             model=self.model_dir,
             dtype=dtype_mapping[model_info.torch_dtype],
@@ -215,7 +235,6 @@ class VllmEngine(InferEngine):
             disable_custom_all_reduce=disable_custom_all_reduce,
             enforce_eager=enforce_eager,
             trust_remote_code=True,
-            enable_prefix_caching=enable_prefix_caching,
             distributed_executor_backend=distributed_executor_backend,
             **engine_kwargs,
         )
@@ -323,7 +342,11 @@ class VllmEngine(InferEngine):
                 media_data = inputs.get(key) or []
                 if media_data:
                     if self._version_ge('0.6'):
-                        mm_data[key.rstrip('s')] = media_data[0] if len(media_data) == 1 else media_data
+
+                        mm_data[key.rstrip('s')] = media_data[0] if (
+                            len(media_data) == 1 and
+                            # compat qwen3_vl
+                            not isinstance(media_data[0], tuple)) else media_data
                     else:
                         assert len(media_data) == 1, (
                             f'The current version of vllm only supports single {key}. Please upgrade to vllm >= 0.6.0')
@@ -333,12 +356,23 @@ class VllmEngine(InferEngine):
             mm_processor_kwargs = inputs.get('mm_processor_kwargs')
             if mm_processor_kwargs:
                 llm_inputs['mm_processor_kwargs'] = mm_processor_kwargs
-            if self.task_type == 'embedding':
-                from vllm.pooling_params import PoolingParams
-                if 'task' in inspect.signature(PoolingParams).parameters:
-                    pooling_params = PoolingParams(task='embed')
-                else:
-                    pooling_params = PoolingParams()
+
+            has_task_arg = 'task' in inspect.signature(PoolingParams).parameters
+            has_activation_arg = 'activation' in inspect.signature(PoolingParams).parameters
+            task_mapping = {
+                'embedding': 'embed',
+                'seq_cls': 'classify',
+                'reranker': 'score',
+                'generative_reranker': 'score',
+            }
+            if self.task_type in task_mapping:
+                pooling_kwargs = {}
+                if has_task_arg:
+                    pooling_kwargs['task'] = task_mapping[self.task_type]
+                if self.task_type in ('reranker', 'generative_reranker') and \
+                        has_activation_arg and self.reranker_use_activation:
+                    pooling_kwargs['activation'] = True
+                pooling_params = PoolingParams(**pooling_kwargs)
                 return self.engine.encode(llm_inputs, pooling_params, request_id)
             elif self.use_async_engine:
                 return self.engine.generate(llm_inputs, generation_config, request_id, **kwargs)
@@ -549,6 +583,44 @@ class VllmEngine(InferEngine):
             prompt_token_ids=prompt_token_ids,
             images_size=images_size)
 
+    def _create_seq_cls_response(
+        self,
+        result,
+        template,
+        request_config,
+        request_id,
+    ) -> ChatCompletionResponse:
+        assert result is not None
+        choices = []
+        preds = result.outputs.data
+        if preds.dim() == 1:
+            preds = preds.unsqueeze(0)
+        if self.task_type == 'seq_cls':
+            top_logprobs = request_config.top_logprobs or 20
+            preds, logprobs = template.decode_seq_cls(preds, top_logprobs)
+        else:
+            logprobs = [None] * len(preds)
+        num_prompt_token_ids = 0
+        num_generated_tokens = 0
+        for i, pred in enumerate(preds):
+            num_prompt_token_ids += len(result.prompt_token_ids)
+            num_generated_tokens += 1
+            if isinstance(pred, torch.Tensor):
+                pred = pred.tolist()
+            choices.append(
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role='assistant', content=pred, tool_calls=None),
+                    finish_reason='stop',
+                    logprobs=logprobs[i]))
+        usage_info = self._get_usage_info(num_prompt_token_ids, num_generated_tokens)
+        return ChatCompletionResponse(
+            model=self.model_name,
+            choices=choices,
+            usage=usage_info,
+            id=request_id,
+            prompt_token_ids=result.prompt_token_ids)
+
     async def _infer_full_async(
         self,
         template: Template,
@@ -566,6 +638,8 @@ class VllmEngine(InferEngine):
             pass
         if self.task_type == 'embedding':
             return self._create_embedding_response(result, template, generation_config, request_id)
+        elif self.task_type in ('seq_cls', 'reranker', 'generative_reranker'):
+            return self._create_seq_cls_response(result, template, request_config, request_id)
         else:
             return self._create_chat_completion_response(result, inputs, template, request_config, request_id)
 
@@ -700,6 +774,8 @@ class VllmEngine(InferEngine):
     @staticmethod
     def patch_remove_log():
         from vllm.engine import async_llm_engine
+        if not hasattr(async_llm_engine, '_log_task_completion'):
+            return
 
         async_llm_engine._origin_log_task_completion = async_llm_engine._log_task_completion
 

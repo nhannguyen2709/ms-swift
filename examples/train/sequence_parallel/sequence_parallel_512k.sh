@@ -4,10 +4,11 @@
 # NPROC_PER_NODE=8 \
 NPROC_PER_NODE=1
 CELOSS_PARALLEL_SIZE=2048 \
-accelerate launch swift/cli/sft.py \
-    --model Qwen/Qwen3-32B \
-    --train_type full \
-    --dataset './medical-reasoning.jsonl' \
+swift sft \
+    --model Qwen/QwQ-32B \
+    --train_type lora \
+    --dataset 'AI-ModelScope/LongAlpaca-12k' \
+    --load_from_cache_file true \
     --split_dataset_ratio 0.01 \
     --torch_dtype bfloat16 \
     --per_device_train_batch_size 1 \

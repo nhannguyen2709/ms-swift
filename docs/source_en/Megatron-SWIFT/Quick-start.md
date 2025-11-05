@@ -2,12 +2,21 @@
 
 ms-swift incorporates Megatron's parallelization techniques to accelerate the training of large models, including data parallelism, tensor parallelism, pipeline parallelism, sequence parallelism, context parallelism, and expert parallelism. It supports CPT/SFT/DPO for models such as Qwen3, [Qwen3-MoE](https://github.com/modelscope/ms-swift/blob/main/examples/megatron/qwen3_moe.sh), Qwen2.5, Llama3, Deepseek-R1 and GLM4.5 series. For a complete list of supported models, please refer to the [Supported Models and Datasets documentation](../Instruction/Supported-models-and-datasets.md). We recommend using Megatron-SWIFT for MoE training; it can typically achieve a 10x speedup in training.
 
+
+| Method                             | Full-parameter | LoRA | MoE  | Multimodal |
+| ---------------------------------- | -------------- | ---- | ---- | ---------- |
+| Pretraining                        | ✅              | ✅    | ✅    | ✅          |
+| Instruction-supervised fine-tuning | ✅              | ✅    | ✅    | ✅          |
+| DPO                                | ✅              | ✅    | ✅    | ✅          |
+| KTO                                | ✅              | ✅    | ✅    | ✅          |
+| RM                                | ✅              | ✅    | ✅    | ✅          |
+| Classification tasks               | ✅              | ✅    | ✅    | ✅          |
+
 ## Environment Setup
 
 To use Megatron-SWIFT, in addition to installing the `swift` dependencies, you also need to install the following:
 
 ```shell
-# Recommended PyTorch version: 2.5 / 2.6
 pip install pybind11
 
 # transformer_engine
@@ -19,8 +28,6 @@ pip install --no-build-isolation transformer_engine[pytorch]
 # apex
 git clone https://github.com/NVIDIA/apex
 cd apex
-# https://github.com/modelscope/ms-swift/issues/4176
-git checkout e13873debc4699d39c6861074b9a3b2a02327f92
 pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" ./
 
 # megatron-core
@@ -28,36 +35,42 @@ pip install git+https://github.com/NVIDIA/Megatron-LM.git@core_r0.13.0
 
 # If you are using multi-node training, please additionally set the `MODELSCOPE_CACHE` environment variable to a shared storage path.
 # This will ensure that the dataset cache is shared, thereby speeding up preprocessing.
+# Note: This step is crucial; otherwise multi-machine training may hang due to data inconsistencies caused by randomness in data preprocessing.
 export MODELSCOPE_CACHE='/xxx/shared'
 
 # Megatron-LM
 # The training module in the dependent library Megatron-LM will be cloned and installed by swift via `git clone`. Alternatively, you can use the environment variable `MEGATRON_LM_PATH` to point to the path of an already downloaded repository (in offline environments, use the [core_r0.13.0 branch](https://github.com/NVIDIA/Megatron-LM/tree/core_r0.13.0)).
+git clone --branch core_r0.13.0 https://github.com/NVIDIA/Megatron-LM.git
 export MEGATRON_LM_PATH='/xxx/Megatron-LM'
+
+# flash_attn
+# Choose an appropriate version to install: https://github.com/Dao-AILab/flash-attention/releases/tag/v2.8.1
+# Note: Do not install a version higher than the maximum supported by transformer_engine: https://github.com/NVIDIA/TransformerEngine/blob/release_v2.6/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L109
+MAX_JOBS=8 pip install "flash-attn<2.8.2" --no-build-isolation
 ```
 
-Alternatively, you can also use the image:
+Alternatively, you can also use the image: (See historical images [here](../GetStarted/SWIFT-installation.md#mirror))
 ```
-modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.6.3-py311-torch2.7.1-vllm0.10.0-modelscope1.28.2-swift3.7.2
-modelscope-registry.cn-beijing.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.6.3-py311-torch2.7.1-vllm0.10.0-modelscope1.28.2-swift3.7.2
-modelscope-registry.us-west-1.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.6.3-py311-torch2.7.1-vllm0.10.0-modelscope1.28.2-swift3.7.2
+modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.8.0-vllm0.11.0-modelscope1.31.0-swift3.9.1
+modelscope-registry.cn-beijing.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.8.0-vllm0.11.0-modelscope1.31.0-swift3.9.1
+modelscope-registry.us-west-1.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.8.0-vllm0.11.0-modelscope1.31.0-swift3.9.1
 ```
 
 Recommended Operating Environment:
 
 |        | Range | Recommended | Notes |
 |--------------|--------------|-------------|--------------------|
-| python       | >=3.9        | 3.10        |                    |
+| python       | >=3.9        | 3.10/3.11        |                    |
 | cuda         |              | cuda12      |                    |
-| torch        | >=2.0        | 2.6.0/2.7.1    |                    |
+| torch        | >=2.0        | 2.7.1/2.8.0    |                    |
 | transformer_engine    | >=2.3       |         |                  |
 | apex |   |  0.1 | |
-| megatron_core    | >=0.12       | 0.13      |                  |
-| flash_attn    |        | 2.7.4.post1/3.0.0b1   |                  |
-| transformers | >=4.33       | 4.51.3      |                    |
+| megatron_core    |        | 0.13      |                  |
+| flash_attn    |        | 2.8.1/3.0.0b1   |                  |
+| transformers | >=4.33       | 4.57.1      |                    |
 | modelscope   | >=1.23       |             |                    |
 | peft         | >=0.11,<0.18 |             |      LoRA          |
-| trl          | >=0.15,<0.21 |       |      RLHF        |
-| deepspeed    | >=0.14       | 0.16.9      |                  |
+| trl          | >=0.15,<0.25 |       |      RLHF        |
 
 
 ## Quick Start Example
@@ -148,6 +161,16 @@ I am a language model developed by swift, you can call me swift-robot. How can I
 - For pretraining, you can use `megatron pt` instead of `megatron sft`, which will use a generative template for training.
 - Megatron-SWIFT uses the same dataset and template processing modules as ms-swift, thus supporting techniques such as packing, loss scale, and agent training. For custom dataset formats, please refer to the [Custom Dataset Documentation](../Customization/Custom-dataset.md).
 - **More Examples**: Including packing, multi-node training, 32K context length, DPO, MoE models, and pre-training, can be found [here](https://github.com/modelscope/ms-swift/tree/main/examples/megatron).
+
+
+## Training Tips
+- Methods to increase training throughput: use packing, increase data parallelism (DP), reduce recomputation, and increase compute-communication overlap. MoE models can also be accelerated by dropping tokens.
+- Parallelism choices:
+  - Megatron-SWIFT uses ZeRO-1 (use_distributed_optimizer enabled by default) combined with various parallelism techniques.
+  - DP is the fastest but consumes the most memory; use other parallel techniques to reduce memory usage.
+  - TP/EP involve heavy communication, so keep them within the NVLink domain when possible; for cross-domain setups prefer PP/DP. For expert layers, prefer EP over ETP — ETP saves memory but is slower.
+  - MoE parallel folding: separate MoE parallel groups from Dense groups. Attention uses tp-cp-dp-pp groups, while MoE uses etp-ep-dp-pp groups.
+- Choosing parallelism for weight conversion: Megatron-SWIFT uses the torch_dist storage format on the MCore side; you can adjust parallelism at training time and do not need to specify it during weight conversion.
 
 
 ## Benchmark

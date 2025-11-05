@@ -390,6 +390,8 @@ class Seq2SeqTrainer(SwiftMixin, DataLoaderMixin, HfSeq2SeqTrainer):
             if self.model.model_info.is_moe_model and self.args.router_aux_loss_coef is not None:
                 aux_loss = outputs.get('aux_loss')
                 if aux_loss is not None:
+                    if num_items_in_batch is not None:
+                        aux_loss = aux_loss * ((labels[:, 1:] != -100).sum() / num_items_in_batch)
                     loss = loss + self.args.router_aux_loss_coef * aux_loss.to(loss.device)
 
         if getattr(self.args, 'average_tokens_across_devices',
@@ -397,9 +399,12 @@ class Seq2SeqTrainer(SwiftMixin, DataLoaderMixin, HfSeq2SeqTrainer):
             loss *= self.accelerator.num_processes
 
         if (outputs.logits is not None and labels is not None and self.args.tuner_backend != 'unsloth'):
+            cu_seqlens = None
+            if self.template.padding_free and self.args.acc_strategy == 'seq':
+                cu_seqlens = self.get_cu_seqlens(text_position_ids, inputs.get('logits_to_keep'))
             # Liger does not have logits
             # Unsloth has a bug with output logits
-            self._compute_acc(outputs, labels)
+            self._compute_acc(outputs, labels, cu_seqlens=cu_seqlens)
         return (loss, outputs) if return_outputs else loss
 
     def training_step(self, model, inputs, *args, **kwargs):

@@ -13,8 +13,10 @@ class LLMTemplateType:
     qwen2_5_math = 'qwen2_5_math'
     qwen2_5_math_prm = 'qwen2_5_math_prm'
     qwen3 = 'qwen3'
+    qwen3_guard = 'qwen3_guard'
     qwen3_thinking = 'qwen3_thinking'
     qwen3_nothinking = 'qwen3_nothinking'
+    qwen3_coder = 'qwen3_coder'
     qwen3_emb = 'qwen3_emb'
     qwen3_reranker = 'qwen3_reranker'
     qwq_preview = 'qwq_preview'
@@ -34,12 +36,14 @@ class LLMTemplateType:
 
     minimax = 'minimax'
     minimax_m1 = 'minimax_m1'
+    minimax_m2 = 'minimax_m2'
     minimax_vl = 'minimax_vl'
 
     numina = 'numina'
     ziya = 'ziya'
     atom = 'atom'
     mengzi = 'mengzi'
+    bge_reranker = 'bge_reranker'
 
     chatglm2 = 'chatglm2'
     glm4 = 'glm4'
@@ -85,6 +89,8 @@ class LLMTemplateType:
     phi4 = 'phi4'
 
     ling = 'ling'
+    ling2 = 'ling2'
+    ring2 = 'ring2'
     yuan = 'yuan'
     xverse = 'xverse'
     bluelm = 'bluelm'
@@ -95,6 +101,7 @@ class LLMTemplateType:
     hunyuan_moe = 'hunyuan_moe'
     hunyuan = 'hunyuan'
     ernie = 'ernie'
+    ernie_thinking = 'ernie_thinking'
     longchat = 'longchat'
 
     aya = 'aya'
@@ -114,7 +121,9 @@ class MLLMTemplateType:
     qwen2_vl = 'qwen2_vl'
     qwen2_5_vl = 'qwen2_5_vl'
     qwen2_5_omni = 'qwen2_5_omni'
+    qwen3_omni = 'qwen3_omni'
     qwen2_audio = 'qwen2_audio'
+    qwen3_vl = 'qwen3_vl'
     qwen2_gme = 'qwen2_gme'
     qvq = 'qvq'
     ovis1_6 = 'ovis1_6'
@@ -144,6 +153,7 @@ class MLLMTemplateType:
     llava1_6_yi = 'llava1_6_yi'
     llava_next_qwen = 'llava_next_qwen'
     llama3_llava_next = 'llama3_llava_next'
+    llava_onevision1_5 = 'llava_onevision1_5'
 
     yi_vl = 'yi_vl'
 
@@ -155,6 +165,9 @@ class MLLMTemplateType:
     internvl3_5 = 'internvl3_5'
     internvl3_5_gpt = 'internvl3_5_gpt'
     interns1 = 'interns1'
+    internvl_hf = 'internvl_hf'
+
+    jina_reranker_m0 = 'jina_reranker_m0'
 
     xcomposer2 = 'ixcomposer2'
     xcomposer2_4khd = 'xcomposer2_4khd'
@@ -181,6 +194,7 @@ class MLLMTemplateType:
     deepseek_vl2 = 'deepseek_vl2'
     deepseek_janus = 'deepseek_janus'
     deepseek_janus_pro = 'deepseek_janus_pro'
+    deepseek_ocr = 'deepseek_ocr'
 
     mplug_owl2 = 'mplug_owl2'
     mplug_owl3 = 'mplug_owl3'
@@ -196,7 +210,9 @@ class MLLMTemplateType:
     step_audio2_mini = 'step_audio2_mini'
     kimi_vl = 'kimi_vl'
     keye_vl = 'keye_vl'
+    keye_vl_1_5 = 'keye_vl_1_5'
     dots_ocr = 'dots_ocr'
+    sail_vl2 = 'sail_vl2'
 
     idefics3 = 'idefics3'
     pixtral = 'pixtral'
@@ -210,6 +226,7 @@ class MLLMTemplateType:
     gemma3_vision = 'gemma3_vision'
     gemma3n = 'gemma3n'
     mistral_2503 = 'mistral_2503'
+    paddle_ocr = 'paddle_ocr'
 
 
 class TemplateType(LLMTemplateType, MLLMTemplateType, RMTemplateType):

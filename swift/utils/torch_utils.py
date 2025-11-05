@@ -262,8 +262,23 @@ def find_all_linears(model, model_arch=None, extra_layers=None, sub_module=None)
     return find_layers(model, _cond, sub_module=sub_module)
 
 
+_DISABLE_USE_BARRIER = False
+
+
+@contextmanager
+def disable_safe_ddp_context_use_barrier():
+    global _DISABLE_USE_BARRIER
+    _DISABLE_USE_BARRIER = True
+    try:
+        yield
+    finally:
+        _DISABLE_USE_BARRIER = False
+
+
 @contextmanager
 def safe_ddp_context(hash_id: Optional[str], use_barrier: bool = True):
+    if _DISABLE_USE_BARRIER:
+        use_barrier = False
     if use_barrier and dist.is_initialized():
         if is_dist():
             if not is_master():
@@ -317,6 +332,17 @@ def get_current_device():
     return current_device
 
 
+def get_torch_device():
+    if is_torch_cuda_available():
+        return torch.cuda
+    elif is_torch_npu_available():
+        return torch.npu
+    elif is_torch_mps_available():
+        return torch.mps
+    else:
+        return torch.cpu
+
+
 def set_device(local_rank: Optional[Union[str, int]] = None):
     if local_rank is None:
         local_rank = max(0, get_dist_setting()[1])
@@ -347,6 +373,21 @@ def empty_cache():
 def gc_collect() -> None:
     gc.collect()
     empty_cache()
+
+
+def get_cu_seqlens_from_position_ids(position_ids: torch.LongTensor):
+    position_ids = position_ids[0]
+    seq_start_indices = torch.where(position_ids == 0)[0]
+    seq_end_indices = torch.cat([seq_start_indices[1:], torch.tensor([len(position_ids)], device=position_ids.device)])
+    seq_lengths = seq_end_indices - seq_start_indices
+    cu_seqlens = torch.cumsum(torch.cat([torch.tensor([0], device=position_ids.device), seq_lengths]), dim=0)
+    return cu_seqlens
+
+
+def get_position_ids_from_cu_seqlens(cu_seqlens: torch.LongTensor):
+    seq_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+    position_ids = torch.cat([torch.arange(seq_len, device=cu_seqlens.device) for seq_len in seq_lengths], dim=0)
+    return position_ids.unsqueeze(0)
 
 
 class Serializer:

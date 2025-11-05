@@ -32,6 +32,7 @@ class SwiftInfer(SwiftPipeline):
         if args.infer_backend == 'pt':
             model, self.template = prepare_model_template(args)
             self.infer_engine = PtEngine.from_model_template(model, self.template, max_batch_size=args.max_batch_size)
+            self.infer_engine.reranker_use_activation = args.reranker_use_activation
             logger.info(f'model: {self.infer_engine.model}')
         else:
             self.template = args.get_template(None)
@@ -56,6 +57,8 @@ class SwiftInfer(SwiftPipeline):
             'template': template,
         })
         infer_backend = kwargs.pop('infer_backend', None) or args.infer_backend
+        if infer_backend in {'pt', 'vllm'}:
+            kwargs['reranker_use_activation'] = args.reranker_use_activation
         if infer_backend == 'pt':
             from .infer_engine import PtEngine
             infer_engine_cls = PtEngine
@@ -244,7 +247,10 @@ class SwiftInfer(SwiftPipeline):
             while idx < len(val_dataset):
                 shard_size = min(args.write_batch_size, len(val_dataset) - idx)
                 shard_dataset = val_dataset.select(range(idx, idx + shard_size))
-                result_list += self._batch_infer(shard_dataset, request_config)
+                result = self._batch_infer(shard_dataset, request_config)
+                if self.jsonl_writer:
+                    self.jsonl_writer.append(result, gather_obj=True)
+                result_list += result
                 idx += shard_size
                 prog_bar.update(shard_size)
             prog_bar.close()
@@ -264,6 +270,11 @@ class SwiftInfer(SwiftPipeline):
             data_parallel_size = args.global_world_size // args.vllm_tensor_parallel_size
         else:
             rank, data_parallel_size = args.rank, args.global_world_size
+        # The dataset is insufficient for DP partitioning
+        if len(val_dataset) < data_parallel_size:
+            if rank >= len(val_dataset):
+                return []
+            data_parallel_size = len(val_dataset)
         if rank >= 0 and data_parallel_size > 1:
             val_dataset = val_dataset.shard(data_parallel_size, rank, contiguous=True)
         val_dataset = list(val_dataset)
@@ -276,14 +287,13 @@ class SwiftInfer(SwiftPipeline):
             labels_list.append(labels)
 
         resp_list = self.infer(val_dataset, request_config, template=self.template, use_tqdm=True, **self.infer_kwargs)
-        if not (args.infer_backend == 'vllm' and rank >= 0 and args.rank % args.vllm_tensor_parallel_size != 0):
+        if not (args.infer_backend == 'vllm' and rank >= 0
+                and args.rank % args.vllm_tensor_parallel_size != 0):  # DP & TP
             for data, resp, labels in zip(val_dataset, resp_list, labels_list):
                 response = resp.choices[0].message.content
                 data['messages'].append({'role': 'assistant', 'content': response})
                 data = {'response': response, 'labels': labels, 'logprobs': resp.choices[0].logprobs, **data}
                 result_list.append(data)
-        if self.jsonl_writer:
-            self.jsonl_writer.append(result_list, gather_obj=True)
         return result_list
 
 

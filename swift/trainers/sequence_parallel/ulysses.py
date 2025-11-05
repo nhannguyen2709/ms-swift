@@ -1,6 +1,7 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 import math
 from functools import partial
+from types import MethodType, SimpleNamespace
 from typing import Any, Optional, Tuple
 
 import torch
@@ -9,7 +10,7 @@ from torch.distributed import init_device_mesh
 from transformers import PreTrainedTokenizer
 
 from swift.llm import HfConfigFactory, get_llm_model
-from ...utils import get_device, get_dist_setting
+from swift.utils import get_cu_seqlens_from_position_ids, get_device, get_dist_setting
 from .utils import GatherLoss
 
 
@@ -252,7 +253,7 @@ class SequenceParallel:
                     if self.rp_world_size is not None and self.rp_world_size > 1:
                         from .zigzag_ring_attn import zigzag_ring_flash_attn_varlen_func
                         position_ids = kwargs['position_ids']
-                        cu_seqlens = self.get_cu_seqlens_from_position_ids(position_ids).to(torch.int32)
+                        cu_seqlens = get_cu_seqlens_from_position_ids(position_ids).to(torch.int32)
                         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
                         position_ids = self._split_packed(position_ids, cu_seqlens)
                         mask = position_ids != -1
@@ -278,6 +279,18 @@ class SequenceParallel:
                             group=self.rp_group)
                         return output
                     else:
+                        if 'cu_seq_lens_q' in kwargs:
+                            position_ids = kwargs.get('position_ids')
+                            if position_ids is None:
+                                position_ids = self.real_position_ids
+                            position_ids = self.pad(position_ids, padding_value=-1, position_ids=position_ids)
+                            cu_seqlens = get_cu_seqlens_from_position_ids(position_ids).to(torch.int32)
+                            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+                            assert query.shape[2] == cu_seqlens[-1]
+                            kwargs['cu_seq_lens_q'] = cu_seqlens
+                            kwargs['cu_seq_lens_k'] = cu_seqlens
+                            kwargs['max_length_q'] = max_seqlen
+                            kwargs['max_length_k'] = max_seqlen
                         return ALL_ATTENTION_FUNCTIONS['flash_attention_2_origin'](module, query, key, value, *args,
                                                                                    **kwargs)[0]
 
@@ -324,7 +337,7 @@ class SequenceParallel:
                 embed_tokens = getattr(_self.language_model, 'embed_tokens', None)
             else:
                 embed_tokens = getattr(_self, 'embed_tokens', None)
-            input_ids, inputs_embeds, _, position_ids, attention_mask, _ = self.pad_and_split_inputs(
+            input_ids, inputs_embeds, _, position_ids, attention_mask, _, _ = self.pad_and_split_inputs(
                 input_ids,
                 inputs_embeds,
                 None,
@@ -354,7 +367,7 @@ class SequenceParallel:
             if isinstance(router_logits, tuple):
                 compute_device = router_logits[0].device
                 router_logits = torch.cat([layer_gate.to(compute_device) for layer_gate in router_logits], dim=0)
-            router_logits, _ = GatherLoss.apply(router_logits, None, self.sp_group)
+            router_logits, _ = GatherLoss.apply(router_logits, None)
             router_logits = router_logits.reshape(self.sp_world_size, num_layers, sp_len,
                                                   -1).transpose(0, 1).reshape(num_layers, self.sp_world_size * sp_len,
                                                                               -1)
@@ -389,6 +402,7 @@ class SequenceParallel:
             SequenceParallel._global_inited = True
 
         self._prepare_forward_hook(llm_model)
+
         if model.model_info.is_moe_model:
             self._prepare_moe_aux_loss(llm_model)
 
@@ -430,7 +444,7 @@ class SequenceParallel:
             return tensor
 
         if position_ids is not None and self.rp_world_size > 1:
-            cu_seqlens = self.get_cu_seqlens_from_position_ids(position_ids)
+            cu_seqlens = get_cu_seqlens_from_position_ids(position_ids)
             all_tensors = []
             for i in range(len(cu_seqlens) - 1):
                 if dim == 1:
@@ -468,7 +482,7 @@ class SequenceParallel:
             gathered_rp = [torch.zeros_like(rp_chunk) for _ in range(self.rp_world_size)]
             torch.distributed.all_gather(gathered_rp, rp_chunk, group=self.rp_group)
 
-            cu_seqlens = self.get_cu_seqlens_from_position_ids(position_ids)
+            cu_seqlens = get_cu_seqlens_from_position_ids(position_ids)
             all_tensor_length = []
             for i in range(len(cu_seqlens) - 1):
                 length = cu_seqlens[i + 1] - cu_seqlens[i]
@@ -494,23 +508,13 @@ class SequenceParallel:
 
             return full_output.unsqueeze(0).contiguous()
         else:
-            gathered_sp = torch.empty((local_output.shape[0] * self.sp_world_size, local_output.shape[1]),
-                                      dtype=local_output.dtype,
-                                      device=local_output.device)
+            gathered_sp = torch.empty(
+                [local_output.shape[0] * self.sp_world_size] + list(local_output.shape[1:]),
+                dtype=local_output.dtype,
+                device=local_output.device)
             dist.all_gather_into_tensor(gathered_sp, local_output, group=self.sp_group)
             gathered_sp = torch.cat(gathered_sp.split(local_output.shape[0], dim=0), dim=dim)
             return gathered_sp.contiguous()
-
-    @staticmethod
-    def get_cu_seqlens_from_position_ids(position_ids: torch.LongTensor):
-        position_ids = position_ids[0]
-        seq_start_indices = torch.where(position_ids == 0)[0]
-        seq_end_indices = torch.cat(
-            [seq_start_indices[1:],
-             torch.tensor([len(position_ids)], device=position_ids.device)])
-        seq_lengths = seq_end_indices - seq_start_indices
-        cu_seqlens = torch.cumsum(torch.cat([torch.tensor([0], device=position_ids.device), seq_lengths]), dim=0)
-        return cu_seqlens
 
     def _split_packed(self, value, cu_seqlens, dim=1):
         """Split and re-group in zigzag"""
@@ -525,8 +529,8 @@ class SequenceParallel:
                 raise NotImplementedError()
             local_value = sub_value.chunk(2 * self.rp_world_size, dim=dim)
             local_values.extend([
-                local_value[self.rp_rank].detach().clone(),
-                local_value[2 * self.rp_world_size - 1 - self.rp_rank].detach().clone(),
+                local_value[self.rp_rank],
+                local_value[2 * self.rp_world_size - 1 - self.rp_rank],
             ])
         return torch.cat(local_values, dim=dim).contiguous()
 
@@ -538,7 +542,7 @@ class SequenceParallel:
         if self.rp_world_size > 1:
             input_dim = input.dim()
             assert input_dim >= 2
-            cu_seqlens = self.get_cu_seqlens_from_position_ids(position_ids)
+            cu_seqlens = get_cu_seqlens_from_position_ids(position_ids)
             assert torch.all(cu_seqlens % (2 * self.rp_world_size) == 0)
             value_chunks = self._split_packed(input, cu_seqlens, dim=dim)
             local_value = value_chunks.chunk(self.sp_world_size, dim=dim)[self.sp_rank].contiguous()
@@ -554,6 +558,27 @@ class SequenceParallel:
             output = tensor_list[rank].contiguous()
             return output
 
+    def pad_and_split_mm_tokens(self, visual_mask, mm_embeds):
+        input_ids = self.extra_kwargs['input_ids']
+        empty_embeds = torch.empty(
+            (input_ids.shape[0], input_ids.shape[1], mm_embeds.shape[-1])).to(mm_embeds.device).to(mm_embeds.dtype)
+        empty_embeds[visual_mask] = mm_embeds
+
+        embeds = SimpleNamespace(weight=mm_embeds)
+
+        _, split_input_embeds, _, _, _, _, extra_values = self.pad_and_split_inputs(
+            None,
+            empty_embeds,
+            None,
+            None,
+            None,
+            None,
+            embeds,
+            self.real_position_ids,
+            extra_split_values=[(visual_mask, 0, -1)])
+        visual_mask = extra_values[0]
+        return visual_mask, split_input_embeds[visual_mask]
+
     def pad_and_split_inputs(self,
                              input_ids,
                              input_embeds,
@@ -562,7 +587,8 @@ class SequenceParallel:
                              attention_mask,
                              loss_scale,
                              embed_tokens=None,
-                             real_position_ids=None):
+                             real_position_ids=None,
+                             extra_split_values=None):
         """Common implementation for padding and splitting inputs
 
         When a sequence comes, it will be split into rp_world_size * 2 sub tensors, and group them as the
@@ -581,14 +607,19 @@ class SequenceParallel:
             loss_scale: loss_scale
             embed_tokens: embed_tokens
             real_position_ids: the real position_ids to represent the seq length information
+            extra_split_values: List of Tuples for extra split values, e.g.: (tensor, pad_value, split_dim)
         """
         tokenizer = self.tokenizer
         real_position_ids = real_position_ids if real_position_ids is not None else position_ids
-        if real_position_ids is not None and real_position_ids.shape[0] == 1:
+        extra_values = []
+        batch_size = input_ids.shape[
+            0] if input_ids is not None else input_embeds.shape[0] if input_embeds is not None else None
+        if real_position_ids is not None and batch_size is not None and real_position_ids.shape[0] == batch_size:
             # TODO clone everytime, but the position_ids is a small tensor
             self.extra_kwargs['text_position_ids'] = real_position_ids.clone()
         if input_ids is not None:
             input_ids = self.pad(input_ids, padding_value=tokenizer.pad_token_id, position_ids=real_position_ids)
+            self.extra_kwargs['input_ids'] = input_ids.clone()
         if input_embeds is not None:
             pad_emb = torch.zeros(
                 (1, embed_tokens.weight.shape[-1])).to(embed_tokens.weight.device).to(embed_tokens.weight.dtype)
@@ -617,6 +648,10 @@ class SequenceParallel:
             if hasattr(self, 'causal_mask_func') and self.causal_mask_func is not None:
                 attention_mask = self.causal_mask_func(attention_mask, inputs.to(self.model_dtype), cache_position,
                                                        None, None)
+        if extra_split_values is not None:
+            for (tensor, pad_value, split_dim) in extra_split_values:
+                extra_values.append(
+                    self.pad(tensor, padding_value=pad_value, position_ids=real_position_ids, dim=split_dim))
         if input_ids is not None:
             input_ids = self.split(input_ids, dim=1, position_ids=real_position_ids)
         if input_embeds is not None:
@@ -630,8 +665,11 @@ class SequenceParallel:
 
         if position_ids is not None:
             position_ids = self.split(position_ids, dim=-1, position_ids=real_position_ids)
-
-        return input_ids, input_embeds, labels, position_ids, attention_mask, loss_scale
+        if extra_split_values is not None:
+            for i in range(len(extra_values)):
+                extra_values[i] = self.split(
+                    extra_values[i], dim=extra_split_values[i][2], position_ids=real_position_ids)
+        return input_ids, input_embeds, labels, position_ids, attention_mask, loss_scale, extra_values
 
     def _init_device_mesh(self):
         """Initialize device mesh for sequence and ring parallel.
@@ -703,14 +741,16 @@ class SequenceParallel:
         2. split labels
         """
         position_ids = None
-        if self.padding_free:
-            position_ids = inputs.get('text_position_ids')
-            if position_ids is None:
-                position_ids = inputs.get('position_ids')
-        if position_ids is not None and position_ids.shape[0] == 1:
+        position_ids = inputs.get('text_position_ids')
+        input_ids = inputs.get('input_ids')
+        if position_ids is None:
+            position_ids = inputs.get('position_ids')
+        if position_ids is not None and input_ids is not None and position_ids.shape[0] == input_ids.shape[0]:
             self.extra_kwargs['text_position_ids'] = position_ids.clone()
+        if input_ids is not None:
+            self.extra_kwargs['input_ids'] = input_ids.clone()
         if 'labels' in inputs:
             labels = inputs['labels']
-            _, _, labels, _, _, _ = self.pad_and_split_inputs(
+            _, _, labels, _, _, _, _ = self.pad_and_split_inputs(
                 None, None, labels, None, None, None, real_position_ids=position_ids)
             inputs['labels'] = labels

@@ -1,5 +1,6 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 import concurrent.futures
+import logging
 import os
 import subprocess
 import sys
@@ -378,6 +379,15 @@ def _patch_TEGroupedLinear():
     TEGroupedLinear.sharded_state_dict = sharded_state_dict
 
 
+def _patch_megatron_tokenizer():
+    from megatron.training import global_vars
+
+    def build_tokenizer(args):
+        return 'dummy_tokenizer'
+
+    global_vars.build_tokenizer = build_tokenizer
+
+
 def _patch_peft_ModulesToSaveWrapper():
     if version.parse(peft.__version__) >= version.parse('0.16'):
         from peft.utils import other as peft_module
@@ -397,7 +407,7 @@ def _patch_peft_ModulesToSaveWrapper():
                 metadata: Optional[dict] = None,
         ) -> ShardedStateDict:
             sharded_state_dict = tuners_sharded_state_dict(self, prefix, sharded_offsets, metadata)
-            if prefix == 'output_layer.':
+            if prefix in {'output_layer.', 'language_model.output_layer.'}:
                 for k in list(sharded_state_dict.keys()):
                     if '_extra_state' in k:
                         # Old GPT checkpoints only stored the output layer weight key. So we remove the
@@ -508,6 +518,16 @@ def _patch_torch_FileSystemReader():
     FileSystemReader.read_data = read_data
 
 
+def _patch_validate_non_overlapping_shards_metadata():
+    # too slow
+    from torch.distributed._shard.sharded_tensor import api
+
+    def validate_non_overlapping_shards_metadata(*args, **kwargs):
+        pass
+
+    api.validate_non_overlapping_shards_metadata = validate_non_overlapping_shards_metadata
+
+
 def _patch_TELinear():
     from megatron.core.extensions.transformer_engine import TELinear
 
@@ -518,6 +538,16 @@ def _patch_TELinear():
     TELinear.__repr__ = __repr__
 
 
+def _patch_build_train_valid_test_datasets():
+    from megatron.training import training
+
+    def build_train_valid_test_datasets(build_train_valid_test_datasets_provider):
+        train_valid_test_num_samples = training.get_train_valid_test_num_samples()
+        return build_train_valid_test_datasets_provider(train_valid_test_num_samples)
+
+    training.build_train_valid_test_datasets = build_train_valid_test_datasets
+
+
 def _patch_mrope():
     from megatron.core.models.common.embeddings.rotary_pos_embedding import MultimodalRotaryEmbedding
     from megatron.core import parallel_state
@@ -526,6 +556,25 @@ def _patch_mrope():
     from megatron.core.models.common.embeddings import rope_utils
     from megatron.training import get_args
 
+    # Code borrowed from huggingface/transformers
+    def apply_interleaved_mrope(freqs, mrope_section):
+        """Apply interleaved MRoPE to 3D rotary embeddings.
+        Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
+        interleaved [THTHWHTHW...TT], preserving frequency continuity.
+        args:
+            x: (3, bs, seq_len, head_dim // 2)
+            mrope_section: (3,)
+        returns:
+            x_t: (bs, seq_len, head_dim // 2)
+        """
+        freqs_t = freqs[0]  # just overwrite the first dimension T
+        for dim, offset in enumerate((1, 2), start=1):  # H, W
+            length = mrope_section[dim] * 3
+            idx = slice(offset, length, 3)
+            freqs_t[..., idx] = freqs[dim, ..., idx]
+        return freqs_t
+
+    # Code borrowed from NVIDIA/Megatron-LM
     def forward(self, position_ids, mrope_section: List[int], packed_seq: bool = False) -> torch.Tensor:
         seq = position_ids.to(device=self.inv_freq.device, dtype=self.inv_freq.dtype)
 
@@ -538,19 +587,24 @@ def _patch_mrope():
         seq_expanded = seq[:, :, None, :].float()
         # shape (3, bs, seq_length, dim)
         freqs = (inv_freq_expanded @ seq_expanded).transpose(2, 3)
-        # first part even vector components, second part odd vector components,
-        #  2 * dim in dimension size
-        if not self.rotary_interleaved:
-            emb = torch.cat((freqs, freqs), dim=-1)  # shape (3, bs, seq_length, 2 * dim)
+        args = get_args()
+        if args.mrope_interleaved:
+            freqs = apply_interleaved_mrope(freqs, mrope_section)
+            emb = torch.cat((freqs, freqs), dim=-1)
         else:
-            bs = freqs.shape[1]
-            emb = torch.stack((freqs.view(3, bs, -1, 1), freqs.view(3, bs, -1, 1)),
-                              dim=-1).view(3, bs, freqs.shape[0], -1)
+            # first part even vector components, second part odd vector components,
+            #  2 * dim in dimension size
+            if not self.rotary_interleaved:
+                emb = torch.cat((freqs, freqs), dim=-1)  # shape (3, bs, seq_length, 2 * dim)
+            else:
+                bs = freqs.shape[1]
+                emb = torch.stack((freqs.reshape(3, bs, -1, 1), freqs.reshape(3, bs, -1, 1)),
+                                  dim=-1).view(3, bs, freqs.shape[2], -1)
 
-        # generate freqs with mrope_section
-        # shape (bs, seq_length, 2 * dim)
-        mrope_section = mrope_section * 2
-        emb = torch.cat([m[i % 3] for i, m in enumerate(emb.split(mrope_section, dim=-1))], dim=-1)
+            # generate freqs with mrope_section
+            # shape (bs, seq_length, 2 * dim)
+            mrope_section = mrope_section * 2
+            emb = torch.cat([m[i % 3] for i, m in enumerate(emb.split(mrope_section, dim=-1))], dim=-1)
 
         # shape (seq_length, bs, 1, 2 * dim)
         emb = emb[..., None, :].transpose(0, 1).contiguous()
@@ -585,10 +639,17 @@ def _patch_mrope():
             Tensor: Shape [t, h, d]. The input tensor after applying RoPE.
         """
         args = get_args()
-        if args.position_embedding_type != 'mrope':
+        cu_seqlens_for_batched = cu_seqlens
+        use_batched_mrope = False
+        if cp_group is not None:
+            cp_size = cp_group.size()
+            cu_seqlens_for_batched = cu_seqlens // cp_size
+            use_batched_mrope = (freqs.dim() >= 1 and freqs.shape[0] == cu_seqlens_for_batched[-1]).item()
+        if args.position_embedding_type != 'mrope' and not use_batched_mrope:
+            logger.warning_once('Using non-batched RoPE, which may affect performance.')
             return _origin_apply_rotary_pos_emb_thd(
                 t,
-                cu_seqlens,
+                cu_seqlens_for_batched,
                 freqs,
                 rotary_interleaved=rotary_interleaved,
                 multi_latent_attention=multi_latent_attention,
@@ -598,24 +659,20 @@ def _patch_mrope():
 
         if cp_group is None:
             raise ValueError('cp_group must be provided for THD format RoPE')
-        cp_size = cp_group.size()
-        cu_seqlens = cu_seqlens // cp_size
-        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
 
-        return torch.cat([
-            _apply_rotary_pos_emb_bshd(
-                x.unsqueeze(1),
-                f,
-                rotary_interleaved=rotary_interleaved,
-                multi_latent_attention=multi_latent_attention,
-                mscale=mscale,
-            ) for x, f in zip(torch.split(t, seqlens), torch.split(freqs, seqlens))
-        ]).squeeze(1)
+        return _apply_rotary_pos_emb_bshd(
+            t.unsqueeze(1),
+            freqs,
+            rotary_interleaved=rotary_interleaved,
+            multi_latent_attention=multi_latent_attention,
+            mscale=mscale,
+        ).squeeze(1)
 
     rope_utils._apply_rotary_pos_emb_thd = _apply_rotary_pos_emb_thd
 
 
 def _patch_megatron():
+    logging_level = logging.root.level
     _patch_flash_attn()
     _patch_transformer_engine()
     _patch_TELinear()
@@ -624,12 +681,20 @@ def _patch_megatron():
     _patch_TEGroupedLinear()
     _patch_TransformerLayer()
     _patch_compile_helpers()
+    _patch_build_train_valid_test_datasets()
     _patch_mrope()
+    _patch_megatron_tokenizer()
+    logging.root.setLevel(logging_level)  # revert logger level
     from swift.megatron import tuners  # patch lora
     try:
         _patch_torch_FileSystemReader()
         logger.info('Patch FileSystemReader successfully applied.')
     except Exception:
+        pass
+    try:
+        _patch_validate_non_overlapping_shards_metadata()
+    except Exception:
+        logger.warning('Patch validate_non_overlapping_shards_metadata failed.')
         pass
     try:
         _patch_peft_BaseTuner()

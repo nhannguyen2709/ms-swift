@@ -31,6 +31,8 @@ class MLLMModelArch:
     qwen2_vl = 'qwen2_vl'
     qwen2_audio = 'qwen2_audio'
     qwen2_5_omni = 'qwen2_5_omni'
+    qwen3_vl = 'qwen3_vl'
+    qwen3_omni = 'qwen3_omni'
 
     cogvlm = 'cogvlm'
     glm4v = 'glm4v'
@@ -44,6 +46,7 @@ class MLLMModelArch:
     llava_hf = 'llava_hf'
     llava_hf_legacy = 'llava_hf_legacy'  # transformers<4.52
     llava_next_video_hf = 'llava_next_video_hf'
+    llava_onevision1_5 = 'llava_onevision1_5'
 
     llava_llama = 'llava_llama'
     llava_mistral = 'llava_mistral'
@@ -55,6 +58,7 @@ class MLLMModelArch:
     deepseek_vl = 'deepseek_vl'
     deepseek_vl2 = 'deepseek_vl2'
     deepseek_janus = 'deepseek_janus'
+    deepseek_ocr = 'deepseek_ocr'
 
     mplug_owl2 = 'mplug_owl2'
     mplug_owl2_1 = 'mplug_owl2_1'
@@ -435,6 +439,14 @@ register_model_arch(
 
 register_model_arch(
     MultiModelKeys(
+        MLLMModelArch.deepseek_ocr,
+        language_model='model.layers',
+        vision_tower=['model.sam_model', 'model.vision_model'],
+        aligner='model.projector',
+    ))
+
+register_model_arch(
+    MultiModelKeys(
         MLLMModelArch.deepseek_vl2,
         language_model='language',
         vision_tower='vision',
@@ -524,10 +536,30 @@ else:
 
 register_model_arch(
     MultiModelKeys(
+        MLLMModelArch.qwen3_vl,
+        language_model='model.language_model',
+        aligner=['model.visual.merger', 'model.visual.deepstack_merger_list'],
+        vision_tower='model.visual',
+    ))
+
+register_model_arch(
+    MultiModelKeys(
         MLLMModelArch.qwen2_5_omni,
         language_model='thinker.model',
         vision_tower=['thinker.audio_tower', 'thinker.visual'],
         aligner=['thinker.audio_tower.proj', 'thinker.visual.merger'],
+        generator=['talker', 'token2wav'],
+    ))
+
+register_model_arch(
+    MultiModelKeys(
+        MLLMModelArch.qwen3_omni,
+        language_model='thinker.model',
+        vision_tower=['thinker.audio_tower', 'thinker.visual'],
+        aligner=[
+            'thinker.audio_tower.proj1', 'thinker.audio_tower.proj2', 'thinker.visual.merger',
+            'thinker.visual.merger_list'
+        ],
         generator=['talker', 'token2wav'],
     ))
 
@@ -673,6 +705,14 @@ register_model_arch(MultiModelKeys(
     MLLMModelArch.dots_ocr,
     language_model='model',
 ))
+
+register_model_arch(
+    MultiModelKeys(
+        MLLMModelArch.llava_onevision1_5,
+        language_model='model.language_model',
+        aligner='model.visual.merger',
+        vision_tower='model.visual',
+    ))
 
 
 def get_model_arch(arch_name: Optional[str]) -> Optional[MultiModelKeys]:

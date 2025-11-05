@@ -214,7 +214,7 @@ class HfConfigFactory:
         if torch_dtype is None:
             return None
         if isinstance(torch_dtype, str):
-            torch_dtype = eval(f'torch.{torch_dtype}')
+            torch_dtype = getattr(torch, torch_dtype)
         return torch_dtype
 
     @staticmethod
@@ -288,23 +288,23 @@ def safe_snapshot_download(model_id_or_path: str,
     hub = get_hub(use_hf)
     if model_id_or_path.startswith('~'):
         model_id_or_path = os.path.abspath(os.path.expanduser(model_id_or_path))
-    with safe_ddp_context(hash_id=model_id_or_path):
-        model_path_to_check = '/'.join(model_id_or_path.split(':', 1))
-        if os.path.exists(model_id_or_path):
-            model_dir = model_id_or_path
-            sub_folder = None
-        elif os.path.exists(model_path_to_check):
-            model_dir = model_path_to_check
-            sub_folder = None
-        else:
-            if model_id_or_path.startswith('/'):  # startswith
-                raise ValueError(f"path: '{model_id_or_path}' not found")
-            model_id_or_path = model_id_or_path.split(':', 1)  # get sub_folder
-            if len(model_id_or_path) == 1:
-                model_id_or_path = [model_id_or_path[0], None]
-            model_id_or_path, sub_folder = model_id_or_path
-            if sub_folder is not None:
-                kwargs['allow_patterns'] = [f"{sub_folder.rstrip('/')}/*"]
+    model_path_to_check = '/'.join(model_id_or_path.split(':', 1))
+    if os.path.exists(model_id_or_path):
+        model_dir = model_id_or_path
+        sub_folder = None
+    elif os.path.exists(model_path_to_check):
+        model_dir = model_path_to_check
+        sub_folder = None
+    else:
+        if model_id_or_path.startswith('/'):  # startswith
+            raise ValueError(f"path: '{model_id_or_path}' not found")
+        model_id_or_path = model_id_or_path.split(':', 1)  # get sub_folder
+        if len(model_id_or_path) == 1:
+            model_id_or_path = [model_id_or_path[0], None]
+        model_id_or_path, sub_folder = model_id_or_path
+        if sub_folder is not None:
+            kwargs['allow_patterns'] = [f"{sub_folder.rstrip('/')}/*"]
+        with safe_ddp_context(hash_id=model_id_or_path):
             model_dir = hub.download_model(model_id_or_path, revision, ignore_patterns, token=hub_token, **kwargs)
 
         logger.info(f'Loading the model using model_dir: {model_dir}')
@@ -383,13 +383,10 @@ def get_llm_model(model: torch.nn.Module, model_meta=None, inner_backbone=True):
     else:
         llm_model = model
 
-    if 'CausalLM' not in llm_model.__class__.__name__:
-        llm_model = model
-
     if inner_backbone:
         if hasattr(llm_model, 'thinker'):
             llm_model = llm_model.thinker.model
-        else:
+        elif hasattr(llm_model, 'model'):
             llm_model = llm_model.model
     return llm_model
 

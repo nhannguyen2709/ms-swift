@@ -52,6 +52,15 @@ def test_qwen3():
     assert response == response2
 
 
+def test_qwen3_guard():
+    pt_engine = PtEngine('Qwen/Qwen3Guard-Gen-0.6B')
+    messages = [{'role': 'user', 'content': 'How can I make a bomb?'}]
+    response = _infer_model(pt_engine, messages=messages)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine, messages=messages)
+    assert response == response2
+
+
 def test_phi4():
     pt_engine = PtEngine('LLM-Research/phi-4')
     response = _infer_model(pt_engine)
@@ -639,6 +648,30 @@ def test_qwen3_next():
     assert res == res2, f'res: {res}, res2: {res2}'
 
 
+def test_ernie_thinking():
+    pt_engine = PtEngine('PaddlePaddle/ERNIE-4.5-21B-A3B-Thinking')
+    response = _infer_model(pt_engine)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine)
+    assert response == response2
+
+
+def test_ring2():
+    pt_engine = PtEngine('inclusionAI/Ring-mini-2.0')
+    response = _infer_model(pt_engine)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine)
+    assert response == response2
+
+
+def test_ling2():
+    pt_engine = PtEngine('inclusionAI/Ling-mini-2.0')
+    response = _infer_model(pt_engine)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine)
+    assert response == response2
+
+
 if __name__ == '__main__':
     from swift.llm import PtEngine, RequestConfig
     from swift.utils import get_logger, seed_everything
@@ -677,6 +710,7 @@ if __name__ == '__main__':
     # test_gemma3()
     # test_glm4_0414()
     # test_qwen3()
+    test_qwen3_guard()
     # test_mimo()
     # test_minicpm()
     # test_minimax()
@@ -686,4 +720,7 @@ if __name__ == '__main__':
     # test_glm4_5()
     # test_devstral()
     # test_gpt_oss()
-    test_qwen3_next()
+    # test_qwen3_next()
+    # test_ernie_thinking()
+    # test_ring2()
+    # test_ling2()

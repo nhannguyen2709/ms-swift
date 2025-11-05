@@ -16,6 +16,7 @@ swift sft \
     --model_type qwen3_emb \
     --train_type full \
     --dataset sentence-transformers/stsb:positive \
+    --load_from_cache_file true \
     --split_dataset_ratio 0.05 \
     --eval_strategy steps \
     --output_dir output \
@@ -27,6 +28,5 @@ swift sft \
     --gradient_accumulation_steps 4 \
     --learning_rate 6e-6 \
     --loss_type infonce \
-    --label_names labels \
     --dataloader_drop_last true \
     --deepspeed zero2

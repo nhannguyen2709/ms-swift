@@ -86,7 +86,8 @@ class RolloutArguments(DeployArguments):
     # only for GRPO rollout with AsyncEngine, see details in swift/plugin/multi_turn
     multi_turn_scheduler: Optional[str] = None
     max_turns: Optional[int] = None
-
+    vllm_enable_lora: bool = False
+    vllm_max_lora_rank: int = 16
     # GYM env
     gym_env: Optional[str] = None
     context_manager: Optional[str] = None
@@ -111,6 +112,9 @@ class RolloutArguments(DeployArguments):
                 self.vllm_use_async_engine = True
             else:
                 self.vllm_use_async_engine = False
+
+        if self.use_gym_env is None:
+            self.use_gym_env = self.gym_env is not None
 
     def _check_args(self):
         if self.vllm_pipeline_parallel_size > 1:

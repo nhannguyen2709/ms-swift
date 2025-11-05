@@ -3,28 +3,26 @@ from copy import deepcopy
 from typing import Optional, Tuple, Union
 
 import torch
-from megatron.core.extensions.transformer_engine import TEColumnParallelLinear, TENorm
+from megatron.core.extensions.transformer_engine import TEColumnParallelLinear, TENorm, _get_extra_te_kwargs
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.models.common.embeddings.rope_utils import apply_rotary_pos_emb
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.tensor_parallel import gather_from_sequence_parallel_region, scatter_to_sequence_parallel_region
 from megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
-from megatron.core.transformer.enums import LayerType
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import build_module
 from megatron.core.transformer.transformer_block import TransformerBlockSubmodules, get_num_layers_to_build
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
-from megatron.core.utils import deprecate_inference_params, is_fa_min_version, nvtx_range_pop, nvtx_range_push
+from megatron.core.utils import deprecate_inference_params, is_fa_min_version
 from megatron.training import get_args
 
 from swift.llm import ModelType
 from swift.utils import get_logger
 from ..constant import MegatronModelType
-from ..gpt_model import GPTModel
+from ..gpt_bridge import GPTBridge
 from ..register import MegatronModelMeta, register_megatron_model
-from .config import convert_gpt_hf_config
 
 try:
     from flashattn_hopper.flash_attn_interface import _flash_attn_forward
@@ -132,6 +130,7 @@ class Qwen3NextSelfAttention(SelfAttention):
             (Tuple[Tensor, Tensor]) Attention output and bias.
 
         """
+        from megatron.core.utils import nvtx_range_pop, nvtx_range_push
         # Check if we need to skip RoPE
         # no_rope is 0-indexed array and self.layer_number is 1-indexed
         no_rope = (self.config.no_rope_freq[self.layer_number - 1] if self.config.no_rope_freq else False)
@@ -376,17 +375,22 @@ class Qwen3NextSelfAttention(SelfAttention):
 class Qwen3NextGatedDeltaNet(MegatronModule, _Qwen3NextGatedDeltaNet):
 
     def __init__(self, config: TransformerConfig, submodules: SelfAttentionSubmodules, layer_number: int, **kwargs):
+        assert config.context_parallel_size == 1, 'Qwen3Next currently does not support context parallel.'
         _Qwen3NextGatedDeltaNet.__init__(self, config, layer_number)
         self.config = config
+        extra_kwargs = _get_extra_te_kwargs(config)
+        self.to(dtype=extra_kwargs['params_dtype'], device=extra_kwargs['device'])
 
     def forward(self, hidden_states: torch.Tensor, **kwargs):
         args = get_args()
-        if args.sequence_parallel:
+        if args.sequence_parallel and args.tensor_model_parallel_size > 1:
             hidden_states = gather_from_sequence_parallel_region(hidden_states)
         seq_len = hidden_states.shape[0]
         packed_seq_params = kwargs.get('packed_seq_params')
         thd_format = packed_seq_params is not None and packed_seq_params.qkv_format == 'thd'
-        if thd_format:
+        # Note: for packed inputs, we do not perform padding_free unpadding.
+        # Doing so would allow different sequences to see each other; for efficiency we keep this implementation.
+        if thd_format and not args.packing:
             new_hidden_states = hidden_states.new_zeros(
                 (packed_seq_params.num_samples, packed_seq_params.max_seqlen_q.item(), hidden_states.shape[-1]))
             attention_mask = hidden_states.new_zeros(
@@ -399,19 +403,22 @@ class Qwen3NextGatedDeltaNet(MegatronModule, _Qwen3NextGatedDeltaNet):
             hidden_states = new_hidden_states
         else:
             hidden_states = hidden_states.transpose(0, 1)
-            attention_mask = kwargs['attention_mask'].sum(dim=(1, 3)) > 0
+            attention_mask = kwargs.get('attention_mask')
+            if attention_mask is not None:
+                attention_mask = attention_mask.sum(dim=(1, 3)) > 0
         res = super().forward(hidden_states=hidden_states, attention_mask=attention_mask)
-        if thd_format:
+        if thd_format and not args.packing:
             res = res[attention_mask][:, None]
             res = torch.concat([res, res.new_zeros(seq_len - res.shape[0], 1, res.shape[2])])
         else:
             res = res.transpose(0, 1)
-        if args.sequence_parallel:
+        if args.sequence_parallel and args.tensor_model_parallel_size > 1:
             res = scatter_to_sequence_parallel_region(res)
         return res, None
 
 
 def get_local_layer_specs(config, layer_specs, vp_stage=None):
+    from megatron.core.transformer.enums import LayerType
     num_layers_to_build = get_num_layers_to_build(config, vp_stage=vp_stage)
 
     if config.pipeline_model_parallel_layout is not None:
@@ -425,7 +432,7 @@ def get_local_layer_specs(config, layer_specs, vp_stage=None):
     return local_layer_specs
 
 
-def get_qwen3_next_transformer_layer_spec(config):
+def get_qwen3_next_transformer_layer_spec(config, vp_stage=None):
     config.hetereogenous_dist_checkpoint = True
     # compat Qwen3NextGatedDeltaNet
     args = get_args()
@@ -458,7 +465,7 @@ def get_qwen3_next_transformer_layer_spec(config):
             layer_spec.submodules.self_attention.module = Qwen3NextSelfAttention
         layer_specs.append(layer_spec)
 
-    local_layer_specs = get_local_layer_specs(config, layer_specs)
+    local_layer_specs = get_local_layer_specs(config, layer_specs, vp_stage=vp_stage)
 
     # Block spec.
     block_spec = TransformerBlockSubmodules(layer_specs=local_layer_specs, layer_norm=layer_norm_impl)
@@ -466,60 +473,39 @@ def get_qwen3_next_transformer_layer_spec(config):
     return block_spec
 
 
-def convert_mcore2hf_qwen3_next(hf_model, mg_model):
-    from .mcore2hf import set_mlp_state, set_attn_state
-    args = get_args()
-    hf_model.model.embed_tokens.weight.data.copy_(mg_model.embedding.word_embeddings.weight)
-    if args.untie_embeddings_and_output_weights:
-        hf_model.lm_head.weight.data.copy_(mg_model.output_layer.weight)
-    hf_model.model.norm.weight.data.copy_(mg_model.decoder.final_layernorm.weight - 1)
-    for layer_idx in range(args.num_layers):
-        layer_type = args.layer_types[layer_idx]
-        mg_layer = mg_model.decoder.layers[layer_idx]
-        hf_layer = hf_model.model.layers[layer_idx]
-        mg_attn = mg_layer.self_attention
+class Qwen3NextBridge(GPTBridge):
 
+    def _set_state_dict(self,
+                        mg_module,
+                        mg_key: str,
+                        hf_state_dict,
+                        hf_key: str,
+                        to_mcore: bool,
+                        *,
+                        offset: float = 0,
+                        is_expert: bool = False):
+        if 'layernorm' in mg_key or 'layer_norm_weight' in mg_key:
+            offset = 1 if to_mcore else -1
+        return super()._set_state_dict(
+            mg_module,
+            mg_key,
+            hf_state_dict,
+            hf_key,
+            to_mcore,
+            offset=offset,
+            is_expert=is_expert,
+        )
+
+    def _set_layer_attn(self, mg_layer, hf_state_dict, layer_idx: int, to_mcore: bool):
+        layer_type = self.args.layer_types[layer_idx]
         if layer_type == 'linear_attention':
-            hf_layer.linear_attn.load_state_dict(mg_attn.state_dict(), strict=False)
-            hf_layer.input_layernorm.weight.data.copy_(mg_layer.input_layernorm.weight - 1)
+            hf_state_dict.update(
+                self._set_module(None if mg_layer is None else mg_layer.self_attention, hf_state_dict, 'linear_attn.',
+                                 to_mcore))
+            self._set_state_dict(mg_layer, 'input_layernorm.weight', hf_state_dict, 'input_layernorm.weight', to_mcore)
         elif layer_type == 'full_attention':
-            hf_attn = hf_layer.self_attn
-            set_attn_state(args, mg_attn, hf_attn)
-            hf_layer.input_layernorm.weight.data.copy_(mg_attn.linear_qkv.layer_norm_weight - 1)
-            if args.qk_layernorm:
-                hf_attn.q_norm.weight.data.copy_(mg_attn.q_layernorm.weight - 1)
-                hf_attn.k_norm.weight.data.copy_(mg_attn.k_layernorm.weight - 1)
-
-        set_mlp_state(args, mg_layer.mlp, hf_layer.mlp)
-        hf_layer.post_attention_layernorm.weight.data.copy_(mg_layer.pre_mlp_layernorm.weight - 1)
-
-
-def convert_hf2mcore_qwen3_next(hf_model, mg_model):
-    from .hf2mcore import set_mlp_state, set_attn_state
-    args = get_args()
-    mg_model.embedding.word_embeddings.weight.data.copy_(hf_model.model.embed_tokens.weight)
-    if args.untie_embeddings_and_output_weights:
-        mg_model.output_layer.weight.data.copy_(hf_model.lm_head.weight)
-    mg_model.decoder.final_layernorm.weight.data.copy_(hf_model.model.norm.weight + 1)
-    for layer_idx in range(args.num_layers):
-        layer_type = args.layer_types[layer_idx]
-        mg_layer = mg_model.decoder.layers[layer_idx]
-        hf_layer = hf_model.model.layers[layer_idx]
-        mg_attn = mg_layer.self_attention
-
-        if layer_type == 'linear_attention':
-            mg_attn.load_state_dict(hf_layer.linear_attn.state_dict(), strict=False)
-            mg_layer.input_layernorm.weight.data.copy_(hf_layer.input_layernorm.weight + 1)
-        elif layer_type == 'full_attention':
-            hf_attn = hf_layer.self_attn
-            set_attn_state(args, mg_attn, hf_attn)
-            mg_attn.linear_qkv.layer_norm_weight.data.copy_(hf_layer.input_layernorm.weight + 1)
-            if args.qk_layernorm:
-                mg_attn.q_layernorm.weight.data.copy_(hf_attn.q_norm.weight + 1)
-                mg_attn.k_layernorm.weight.data.copy_(hf_attn.k_norm.weight + 1)
-
-        set_mlp_state(args, mg_layer.mlp, hf_layer.mlp)
-        mg_layer.pre_mlp_layernorm.weight.data.copy_(hf_layer.post_attention_layernorm.weight + 1)
+            hf_state_dict = super()._set_layer_attn(mg_layer, hf_state_dict, layer_idx, to_mcore)
+        return hf_state_dict
 
 
 register_megatron_model(
@@ -529,9 +515,6 @@ register_megatron_model(
             ModelType.qwen3_next,
             ModelType.qwen3_next_thinking,
         ],
-        model_cls=GPTModel,
-        convert_hf_config=convert_gpt_hf_config,
         get_transformer_layer_spec=get_qwen3_next_transformer_layer_spec,
-        convert_mcore2hf=convert_mcore2hf_qwen3_next,
-        convert_hf2mcore=convert_hf2mcore_qwen3_next,
+        bridge_cls=Qwen3NextBridge,
     ))

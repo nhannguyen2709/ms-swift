@@ -46,6 +46,30 @@ class GMETemplate(Qwen2VLTemplate):
 register_template(QwenTemplateMeta(MLLMTemplateType.qwen2_gme, template_cls=GMETemplate, suffix=['<|endoftext|>']))
 
 
+class JinaRerankerM0Template(Qwen2VLTemplate):
+
+    def _preprocess_inputs(self, inputs: StdTemplateInputs) -> None:
+        super()._preprocess_inputs(inputs)
+        instruction = ''
+        if inputs.system is not None:
+            instruction = inputs.system
+            inputs.system = None
+        query = inputs.messages[0]['content']
+        document = inputs.messages[1]['content']
+        user_message = instruction + '\n' + '**Query**:\n' + query + '\n' + '**Document**:\n' + document
+        inputs.messages = [{'role': 'user', 'content': user_message}]
+        return inputs
+
+
+register_template(
+    TemplateMeta(
+        MLLMTemplateType.jina_reranker_m0,
+        template_cls=JinaRerankerM0Template,
+        prefix=[],
+        chat_sep=[],
+        prompt=['{{QUERY}}']))
+
+
 class Qwen3EmbTemplate(Template):
 
     def _preprocess_inputs(self, inputs: StdTemplateInputs) -> None:
@@ -384,4 +408,25 @@ register_template(
         prompt=[' [Round {{ROUND0}}] USER:{{QUERY}} ASSISTANT:'],
         chat_sep=['</longcat_s>'],
         suffix=['</longcat_s>'],
+    ))
+
+register_template(
+    TemplateMeta(
+        LLMTemplateType.ling2,
+        prefix=['<role>SYSTEM</role>detailed thinking off<|role_end|>'],
+        system_prefix=['<role>SYSTEM</role>{{SYSTEM}}\ndetailed thinking off<|role_end|>'],
+        prompt=['<role>HUMAN</role>{{QUERY}}<|role_end|><role>ASSISTANT</role>'],
+        chat_sep=['<|role_end|>'],
+        suffix=['<|role_end|>'],
+    ))
+
+register_template(
+    TemplateMeta(
+        LLMTemplateType.ring2,
+        prefix=[],
+        system_prefix=['<role>SYSTEM</role>{{SYSTEM}}'],
+        prompt=['<role>HUMAN</role>{{QUERY}}<role>ASSISTANT</role>'],
+        chat_sep=[],
+        suffix=['<|endoftext|>'],
+        response_prefix='<think>\n',
     ))
