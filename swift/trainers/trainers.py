@@ -21,6 +21,12 @@ from .arguments import Seq2SeqTrainingArguments, TrainingArguments
 from .mixin import DataLoaderMixin, SwiftMixin
 from .utils import per_token_loss_func, per_token_loss_func_sp
 
+import numpy as np
+import pandas as pd
+import torch.nn.functional as F
+from cafaeval.evaluation import cafa_eval
+from sklearn.metrics import accuracy_score
+
 logger = get_logger()
 
 
@@ -111,11 +117,12 @@ class RerankerTrainer(Trainer):
         self.compute_metrics = self.calculate_metric
         self.label_names = ['labels']
 
-        # Set up preprocess_logits_for_metrics to reduce memory usage for generative reranker
-        if self.args.loss_type in {'generative_reranker', 'listwise_generative_reranker'}:
-            self.preprocess_logits_for_metrics = self._preprocess_generative_reranker_logits
-        else:
-            self.preprocess_logits_for_metrics = None
+        # # Set up preprocess_logits_for_metrics to reduce memory usage for generative reranker
+        # if self.args.loss_type in {'generative_reranker', 'listwise_generative_reranker'}:
+        #     self.preprocess_logits_for_metrics = self._preprocess_generative_reranker_logits
+        # else:
+        #     self.preprocess_logits_for_metrics = None
+        self.preprocess_logits_for_metrics = None
         self.gather_function = gather_for_unpadded_tensors
 
     def _preprocess_generative_reranker_logits(self, logits, labels):
@@ -168,13 +175,54 @@ class RerankerTrainer(Trainer):
             return logits
 
     def evaluation_loop(self, *args, **kwargs):
-        output = super().evaluation_loop(*args, **kwargs)
+        original_mode = self.template.mode
+        self.template.set_mode('pt')
+        try:
+            output = super().evaluation_loop(*args, **kwargs)
+        finally:
+            self.template.set_mode(original_mode)
         self.gather_function = gather_for_unpadded_tensors
         return output
 
     def calculate_metric(self, eval_prediction: EvalPrediction) -> Dict[str, float]:
-        from swift.plugin.loss import calculate_reranker_metrics
-        return calculate_reranker_metrics(eval_prediction.predictions, eval_prediction.label_ids)
+        return {"acc": accuracy_score(eval_prediction.label_ids, np.argmax(eval_prediction.predictions, axis=1))}
+
+
+        # from swift.plugin.loss import calculate_reranker_metrics
+        # return calculate_reranker_metrics(eval_prediction.predictions, eval_prediction.label_ids)
+        
+        df = pd.DataFrame(self.eval_dataset["_extra_kwargs"])
+        df["term"] = df["pos_id"] + df["neg_id"]
+        df["ns"] = df["pos_ns"] + df["neg_ns"]
+        df["accessions"] = df.apply(lambda x: [x["accession"]] * len(x["term"]), axis=1)
+        scores = F.softmax(torch.from_numpy(eval_prediction.predictions), dim=1)[:, 1] # yes probability
+
+        output_dir = self.args.output_dir
+        pred_folder = os.path.join(output_dir, f"predictions-{self.state.global_step}")
+        os.makedirs(pred_folder, exist_ok=True)
+        pred_df = pd.DataFrame({"accession": df["accessions"].explode().values, "term": df["term"].explode().values, "score": scores.tolist(), "ns": df["ns"].explode().values})
+        
+        fmax_scores = []
+        for ns in ["bp", "mf", "cc"]:
+            pred_df[pred_df["ns"]==ns].to_csv(os.path.join(pred_folder, f"{ns}_predictions.tsv"), sep="\t", header=None, index=False)
+            df, dfs_best = cafa_eval(
+                obo_file="data/cafa6/Train/go-basic.obo",
+                pred_dir=pred_folder,
+                gt_file=f"inference/ground_truth/{ns}_ground_truth.tsv",
+                ia="data/cafa6/IA.tsv",
+                no_orphans=False,
+                norm="cafa",
+                exclude="data/uniprot2024/known.txt",
+                toi_file=None,
+                prop="fill",
+                max_terms=500,
+                th_step=0.01,
+                n_cpu=4,
+            )
+            fmax_scores.append(float(dfs_best['f']['f'].values))
+            logger.info(f"F-max score for {ns}: {fmax_scores[-1]}")
+
+        return {"fmax": np.mean(fmax_scores)}
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         # Check if we have a custom loss function
@@ -184,11 +232,61 @@ class RerankerTrainer(Trainer):
             if labels is not None:
                 labels = inputs.pop('labels')
 
+            # Split into batches as 1 query can have many documents
+            if not model.training:
+                from swift.plugin.loss import generative_reranker_loss
+                
+                positive_token_id = self.tokenizer.convert_tokens_to_ids("yes")
+                negative_token_id = self.tokenizer.convert_tokens_to_ids("no")
+                    
+                if inputs["input_ids"].shape[0] > 4:
+                    input_ids = inputs["input_ids"]
+                    attention_mask = inputs["attention_mask"]
+                    split_input_ids = torch.split(input_ids, 4, dim=0)
+                    split_attention_mask = torch.split(attention_mask, 4, dim=0)
+                    split_labels = torch.split(labels, 4, dim=0)
+                    logits = []
+                    loss = []
+                    for i in range(len(split_input_ids)):
+                        outputs = model(**{"input_ids": split_input_ids[i], "attention_mask": split_attention_mask[i]})
+                        loss.append(generative_reranker_loss(outputs, split_labels[i], trainer=self, reduction='none'))
+                        positive_logits = outputs.logits[:, -1, positive_token_id]  # [batch_size]
+                        negative_logits = outputs.logits[:, -1, negative_token_id]  # [batch_size]
+                        binary_logits = torch.stack([negative_logits, positive_logits], dim=1)
+                        logits.append(binary_logits)
+                    logits = torch.cat(logits, dim=0)
+                    outputs.logits = logits
+                    loss = torch.cat(loss).mean()
+                else:
+                    outputs = model(**inputs)
+                    loss = generative_reranker_loss(outputs, labels, trainer=self, reduction='mean')
+                    positive_logits = outputs.logits[:, -1, positive_token_id]  # [batch_size]
+                    negative_logits = outputs.logits[:, -1, negative_token_id]  # [batch_size]
+                    binary_logits = torch.stack([negative_logits, positive_logits], dim=1)
+                    outputs.logits = binary_logits
+
+                return (loss, outputs) if return_outputs else loss
             outputs = model(**inputs)
 
+            last_token_indices = -1
             if labels is not None:
-                # Call custom loss function
-                loss = self.compute_loss_func(outputs, labels, num_items_in_batch=num_items_in_batch, trainer=self)
+                if self.template.sequence_parallel_size > 1:
+                    from swift.trainers.sequence_parallel import sequence_parallel
+                    from swift.trainers.sequence_parallel.utils import GatherLoss
+                    position_ids = sequence_parallel.real_position_ids
+                    if position_ids is not None:
+                        position_ids = sequence_parallel.pad(position_ids, padding_value=-1, position_ids=position_ids)
+                    # Use GatherLoss for proper autograd support instead of sequence_parallel.gather
+                    outputs.logits, _ = GatherLoss.apply(outputs.logits, None, 1, position_ids)
+
+                    if position_ids is not None and position_ids.min() == -1:
+                        padded_input_ids = sequence_parallel.pad(inputs["input_ids"], padding_value=self.tokenizer.pad_token_id, position_ids=position_ids)
+                        last_token_indices = torch.sum((padded_input_ids != self.tokenizer.pad_token_id), dim=1) - 1
+
+                    loss = self.compute_loss_func(outputs, labels, num_items_in_batch=num_items_in_batch, trainer=self, last_token_indices=last_token_indices)
+                else:
+                    # Call custom loss function
+                    loss = self.compute_loss_func(outputs, labels, num_items_in_batch=num_items_in_batch, trainer=self)
             else:
                 # Fallback to model's loss
                 loss = outputs.loss
@@ -197,11 +295,38 @@ class RerankerTrainer(Trainer):
                 loss = loss / self.args.gradient_accumulation_steps
 
             if labels is not None:
-                self._compute_acc(outputs, labels)
+                self._compute_acc(outputs, labels, last_token_indices=last_token_indices)
 
             return (loss, outputs) if return_outputs else loss
         else:
             return super().compute_loss(model, inputs, return_outputs, num_items_in_batch)
+    
+    def _prepare_inputs(self, inputs):
+        from swift.llm import HfConfigFactory
+        args = self.args
+        inputs = super()._prepare_inputs(inputs)
+        if self.template.sequence_parallel_size > 1:
+            from swift.trainers.sequence_parallel import sequence_parallel
+            labels = inputs.pop('labels')
+            sequence_parallel.prepare_inputs(inputs)
+            inputs['labels'] = labels
+
+        use_logits_to_keep = self.get_use_logits_to_keep(self.template.sequence_parallel_size == 1)
+        if use_logits_to_keep:
+            self.prepare_logits_to_keep(inputs)
+            if args.tuner_backend == 'unsloth' and isinstance(inputs['logits_to_keep'], torch.Tensor):
+                inputs['logits_to_keep'] = int(inputs['logits_to_keep'].sum())
+
+        base_model = self.template.get_base_model(self.model)
+        if self.model.model_info.is_moe_model and 'output_router_logits' in inspect.signature(
+                base_model.forward).parameters:
+            HfConfigFactory.set_config_attr(base_model.config, 'router_aux_loss_coef', args.router_aux_loss_coef)
+            base_model.router_aux_loss_coef = args.router_aux_loss_coef
+            logger.info_once(f'router_aux_loss_coef: {args.router_aux_loss_coef}')
+            if args.router_aux_loss_coef > 0:
+                inputs['output_router_logits'] = True
+        inputs['compute_loss_func'] = self.compute_loss_func
+        return inputs
 
 
 class Seq2SeqTrainer(SwiftMixin, DataLoaderMixin, HfSeq2SeqTrainer):

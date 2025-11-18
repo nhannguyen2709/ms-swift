@@ -907,7 +907,7 @@ class SwiftMixin:
         else:
             super().create_optimizer_and_scheduler(num_training_steps=num_training_steps)
 
-    def _compute_acc(self, outputs, labels, cu_seqlens=None) -> None:
+    def _compute_acc(self, outputs, labels, cu_seqlens=None, last_token_indices: int | torch.Tensor = -1) -> None:
         args = self.args
         logits = outputs.logits
         metrics = None
@@ -932,8 +932,9 @@ class SwiftMixin:
 
             if isinstance(positive_token_id, int) and isinstance(negative_token_id, int) \
                     and positive_token_id >= 0 and negative_token_id >= 0:
-                positive_logits = logits[:, -1, positive_token_id]
-                negative_logits = logits[:, -1, negative_token_id]
+                batch_indices = torch.arange(logits.shape[0])
+                positive_logits = logits[batch_indices, last_token_indices, positive_token_id]  # [batch_size]
+                negative_logits = logits[batch_indices, last_token_indices, negative_token_id]  # [batch_size]
                 binary_preds = (positive_logits > negative_logits).long()
                 metrics = compute_acc(
                     binary_preds,

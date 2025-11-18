@@ -584,7 +584,7 @@ def generative_reranker_loss(outputs,
     binary_labels = labels.to(binary_logits.device).long()
 
     # Compute cross entropy loss
-    loss_fct = CrossEntropyLoss()
+    loss_fct = CrossEntropyLoss(reduction=kwargs.get("reduction", "mean"))
     loss = loss_fct(binary_logits, binary_labels)
 
     return loss
@@ -735,9 +735,21 @@ def listwise_generative_reranker_loss(outputs,
                          f'Please check if these tokens exist in the tokenizer vocabulary. Error: {e}')
 
     # Extract logits for positive and negative tokens from last position
-    positive_logits = logits[:, -1, positive_token_id]  # [batch_size]
-    negative_logits = logits[:, -1, negative_token_id]  # [batch_size]
+    # Note: logits are already gathered by trainer when in sequence parallel mode
+    last_token_indices = kwargs.pop("last_token_indices", -1)
+    batch_size = logits.shape[0]
+    
+    if isinstance(last_token_indices, int):
+        # All samples use the same index (standard case)
+        positive_logits = logits[:, last_token_indices, positive_token_id]  # [batch_size]
+        negative_logits = logits[:, last_token_indices, negative_token_id]  # [batch_size]
+    else:
+        # Per-sample indices (for padded sequences in sequence parallel mode)
+        batch_indices = torch.arange(batch_size, device=logits.device)
+        positive_logits = logits[batch_indices, last_token_indices, positive_token_id]  # [batch_size]
+        negative_logits = logits[batch_indices, last_token_indices, negative_token_id]  # [batch_size]
 
+    # Compute relevance scores from logits
     logits = F.logsigmoid(positive_logits - negative_logits)
 
     # Find positive sample indices to determine group boundaries

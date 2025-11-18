@@ -387,6 +387,10 @@ class ResponsePreprocessor(RowPreprocessor):
         history.append([query, response])
 
         row.update({'messages': history_to_messages(history, system)})
+        positive = row.pop('positive', None)
+        negative = row.pop('negative', None)
+        row.update({'positive_messages': [history_to_messages([[None, positive[i]]]) for i in range(len(positive))]})
+        row.update({'negative_messages': [history_to_messages([[None, negative[i]]]) for i in range(len(negative))]})
         return row
 
 

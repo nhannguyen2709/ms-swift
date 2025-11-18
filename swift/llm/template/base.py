@@ -1547,18 +1547,26 @@ class Template(ProcessorMixin):
             max_negative_samples = int(os.environ.get('MAX_NEGATIVE_SAMPLES', 7))
             labels_list = []
             new_batch = []
+            
+            if self.sequence_parallel_size > 1:
+                # Use hash-based deterministic seeding
+                batch_seed = hash(tuple(batch[0]['input_ids'][0])) % (2**31)
+                rng = random.Random(batch_seed)
+            else:
+                rng = random
+            
             for b in batch:
                 labels = b.pop('labels', None)
                 positive_num = sum(labels)
                 negative_num = len(labels) - positive_num
                 max_positive = min(positive_num, max_positive_samples)
                 max_negative = min(negative_num, max_negative_samples)
-                for i in random.sample(range(positive_num), max_positive):
+                for i in rng.sample(range(positive_num), max_positive):
                     new_batch.append(
                         {key: b[key][i]
                          for key in b.keys() if isinstance(b[key], list) and b[key][i] is not None})
                     labels_list.append(1)
-                    for j in random.sample(range(negative_num), max_negative):
+                    for j in rng.sample(range(negative_num), max_negative):
                         new_batch.append({
                             key: b[key][j + positive_num]
                             for key in b.keys() if isinstance(b[key], list) and b[key][j + positive_num] is not None
@@ -1569,10 +1577,17 @@ class Template(ProcessorMixin):
             if labels_list:
                 res['labels'] = torch.tensor(labels_list, dtype=torch.long)
         else:
+            labels_list = []
             new_batch = []
             for b in batch:
-                new_batch.append({key: val for key, val in b.items() if isinstance(val, list)})
+                labels = b.pop("labels", None)
+                for i in range(min(len(labels), 4)):
+                    new_batch.append({key: b[key][i] for key in b.keys() if isinstance(b[key], list) and b[key][i] is not None})
+                    labels_list.append(labels[i])
+                # new_batch.append({key: val for key, val in b.items() if isinstance(val, list)})
             res = self._data_collator(new_batch, padding_to=padding_to)
+            if labels_list:
+                res["labels"] = torch.tensor(labels_list, dtype=torch.long)
         return res
 
     def _seq_cls_data_collator(self,
